@@ -49,17 +49,34 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     require Logger
 
+    @breadcrumb_data_srubber_key :_breadscrumb_data_srubber
+
     # See also:
     # https://develop.sentry.dev/sdk/event-payloads/request/
 
     @doc false
-    @spec on_mount(:default, map() | :not_mounted_at_router, map(), struct()) :: {:cont, struct()}
+    @spec on_mount(
+            :default | [{:breadscrumb_data_srubber, {module(), atom()}}],
+            map() | :not_mounted_at_router,
+            map(),
+            struct()
+          ) :: {:cont, struct()}
+    def on_mount(
+          [{:breadscrumb_data_srubber, {mod, fun} = breadscrumb_data_srubber}],
+          %{} = params,
+          _session,
+          socket
+        )
+        when is_atom(mod) and is_atom(fun) do
+      on_mount(params, socket, breadscrumb_data_srubber)
+    end
+
     def on_mount(:default, %{} = params, _session, socket), do: on_mount(params, socket)
-    def on_mount(:default, :not_mounted_at_router, _session, socket), do: {:cont, socket}
+    def on_mount(_, :not_mounted_at_router, _session, socket), do: {:cont, socket}
 
     ## Helpers
 
-    defp on_mount(params, %Phoenix.LiveView.Socket{} = socket) do
+    defp on_mount(params, %Phoenix.LiveView.Socket{} = socket, breadscrumb_data_srubber \\ nil) do
       Context.set_extra_context(%{socket_id: socket.id})
       Context.set_request_context(%{url: socket.host_uri})
 
@@ -87,6 +104,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       |> maybe_attach_hook_handle_params()
       |> attach_hook(__MODULE__, :handle_event, &handle_event_hook/3)
       |> attach_hook(__MODULE__, :handle_info, &handle_info_hook/2)
+      |> Phoenix.Component.assign(@breadcrumb_data_srubber_key, breadscrumb_data_srubber)
     catch
       # We must NEVER raise an error in a hook, as it will crash the LiveView process
       # and we don't want Sentry to be responsible for that.
@@ -102,7 +120,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     end
 
     defp handle_event_hook(event, params, socket) do
-      Context.add_breadcrumb(%{
+      add_breadcrumb(socket, %{
         category: "web.live_view.event",
         message: inspect(event),
         data: %{event: event, params: params}
@@ -112,7 +130,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
     end
 
     defp handle_info_hook(message, socket) do
-      Context.add_breadcrumb(%{
+      add_breadcrumb(socket, %{
         category: "web.live_view.info",
         message: inspect(message, pretty: true)
       })
@@ -124,7 +142,7 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
       Context.set_extra_context(%{socket_id: socket.id})
       Context.set_request_context(%{url: uri})
 
-      Context.add_breadcrumb(%{
+      add_breadcrumb(socket, %{
         category: "web.live_view.params",
         message: "#{uri}",
         data: %{params: params, uri: uri}
@@ -158,6 +176,20 @@ if Code.ensure_loaded?(Phoenix.LiveView) do
 
     defp get_safe_ip_address(_peer_data) do
       nil
+    end
+
+    defp add_breadcrumb(socket, breadcrumb_info) do
+      breadcrumb_info
+      |> Map.replace_lazy(:data, fn data ->
+        case socket.assigns[@breadcrumb_data_srubber_key] do
+          {mod, fun} ->
+            apply(mod, fun, [data])
+
+          nil ->
+            data
+        end
+      end)
+      |> Context.add_breadcrumb()
     end
   end
 end
